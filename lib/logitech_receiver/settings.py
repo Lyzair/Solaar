@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import struct
+import threading
 import time
 
 from enum import IntEnum
@@ -33,6 +34,15 @@ from .common import NamedInt
 logger = logging.getLogger(__name__)
 
 SENSITIVITY_IGNORE = "ignore"
+
+# The Linux hid-logitech-hidpp driver handles a connect event asynchronously: the
+# report handler only calls schedule_work(&hidpp->work), and hidpp_connect_event()
+# reaches hi_res_scroll_enable() - which writes HIRES_WHEEL mode with the
+# high-resolution bit set - some way into that deferred work.  The write therefore
+# lands whenever the workqueue gets to it, observed up to several seconds after the
+# connect notification Solaar reacts to, so a synchronous apply cannot be relied on
+# to be the last writer.  Re-check once after the driver has had time to run.
+HIRES_WHEEL_RECHECK_DELAY = 4.0
 
 
 class Kind(IntEnum):
@@ -874,8 +884,56 @@ class RawXYProcessing:
         pass
 
 
+def _recheck_hires_wheel(device):
+    """Re-assert the HIRES_WHEEL settings if the Linux driver overwrote them.
+
+    Runs once, HIRES_WHEEL_RECHECK_DELAY after an apply, and only rewrites a
+    setting whose device value no longer matches what was applied.  A device that
+    has gone offline in the meantime is left alone.
+    """
+    if getattr(device, "_closed", False) or not device.online:
+        return
+    persister = getattr(device, "persister", None)
+    if persister is None:
+        return
+    for s in device.settings:
+        if s.feature != hidpp20_constants.SupportedFeature.HIRES_WHEEL:
+            continue
+        if persister.get("_sensitive", {}).get(s.name, False) == SENSITIVITY_IGNORE:
+            continue
+        expected = persister.get(s.name)
+        if expected is None:
+            continue
+        try:
+            if s.read(cached=False) != expected:
+                if logger.isEnabledFor(logging.INFO):
+                    logger.info("%s: %s was overwritten after apply, restoring %r", device, s.name, expected)
+                s.write(expected, save=False)
+        except Exception as e:
+            if logger.isEnabledFor(logging.WARNING):
+                logger.warning("%s: re-check of %s failed (%s): %s", device, s.name, device, repr(e))
+
+
+def cancel_hires_wheel_recheck(device):
+    """Drop a pending re-check, so a closing device does not get poked afterwards."""
+    timer = getattr(device, "_hires_wheel_recheck", None)
+    if timer is not None:
+        timer.cancel()
+        device._hires_wheel_recheck = None
+
+
+def _schedule_hires_wheel_recheck(device):
+    cancel_hires_wheel_recheck(device)  # at most one pending re-check per device
+    timer = threading.Timer(HIRES_WHEEL_RECHECK_DELAY, _recheck_hires_wheel, args=(device,))
+    timer.name = "hires-wheel-recheck"
+    timer.daemon = True
+    device._hires_wheel_recheck = timer
+    timer.start()
+
+
 def apply_all_settings(device):
-    if device.features and hidpp20_constants.SupportedFeature.HIRES_WHEEL in device.features:
+    hires_wheel = bool(device.features and hidpp20_constants.SupportedFeature.HIRES_WHEEL in device.features)
+    if hires_wheel:
         time.sleep(0.2)  # delay to try to get out of race condition with Linux HID++ driver
     persister = getattr(device, "persister", None)
     sensitives = persister.get("_sensitive", {}) if persister else {}
@@ -883,6 +941,10 @@ def apply_all_settings(device):
         ignore = sensitives.get(s.name, False)
         if ignore != SENSITIVITY_IGNORE:
             s.apply()
+    if hires_wheel:
+        # The 0.2s delay above only covers a driver write that is already in flight;
+        # the driver's deferred connect work can write long after this apply returns.
+        _schedule_hires_wheel_recheck(device)
 
 
 Setting.validator_class = settings_validator.BooleanValidator

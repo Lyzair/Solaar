@@ -1050,6 +1050,7 @@ class Device:
         if getattr(self, "_closed", False):
             return None
         self._closed = True
+        settings.cancel_hires_wheel_recheck(self)
         # Run device.cleanups before clearing self.handle — cleanup callbacks
         # typically need to issue final feature_request() writes (e.g. release
         # SW control, restore device-side state) and feature_request() relies
