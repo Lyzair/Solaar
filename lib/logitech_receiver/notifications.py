@@ -216,7 +216,10 @@ def _process_hidpp10_notification(device: Device, notification: HIDPPNotificatio
         device.link_encrypted = link_encrypted
         if not link_established and device.receiver:
             hidpp10.set_configuration_pending_flags(device.receiver, 0xFF)
-        device.changed(active=link_established)
+        # A re-established link means the device may have come back with volatile state reset,
+        # so settings have to be pushed again even though the device never went inactive here:
+        # a Lightspeed link can drop and recover without any 0x40 disconnect notification.
+        device.changed(active=link_established, reconnected=link_established)
         return True
 
     if notification.sub_id == Notification.RAW_INPUT:

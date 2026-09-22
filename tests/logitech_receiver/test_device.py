@@ -26,6 +26,7 @@ from logitech_receiver import device
 from logitech_receiver import hidpp20
 from logitech_receiver.common import BatteryLevelApproximation
 from logitech_receiver.common import BatteryStatus
+from logitech_receiver.hidpp20_constants import SupportedFeature
 
 from . import fake_hidpp
 
@@ -440,3 +441,48 @@ def test_close_runs_cleanups_once():
     test_device.__del__()
 
     assert calls == [test_device]
+
+
+@pytest.mark.parametrize(
+    "kwargs, expect_push",
+    [
+        ({}, False),
+        ({"push": True}, False),
+        ({"reconnected": True}, True),
+    ],
+    ids=["bare-reconnect", "push-with-wireless-status", "link-re-established"],
+)
+def test_changed_pushes_settings_on_reconnect(kwargs, expect_push, mocker):
+    """A Lightspeed link can drop and recover without any 0x40 disconnect notification,
+    so the device never goes inactive and was_active stays True.  The device may still
+    have come back with volatile state reset - the kernel HID++ driver re-enables
+    HIRES_WHEEL on its connect path - so a re-established link has to push settings again.
+
+    push=True alone must not be enough here: the device advertises
+    WIRELESS_DEVICE_STATUS, and that branch deliberately defers to the reconfiguration
+    notification such a device is expected to send but does not always send."""
+    test_device = FakeDevice(fake_hidpp.r_empty, None, None, online=True, device_info=di_CCCC)
+    test_device._name = "TestDevice"
+    test_device._active = True  # already active: a reconnect, not a first connect
+    # A plain dict, not a FeaturesArray: FeaturesArray.__bool__ probes the device and is
+    # falsy for a fake one, which would flip the push branch for the wrong reason.  The
+    # condition under test only needs `not features` and `feature not in features`.
+    test_device.features = {SupportedFeature.WIRELESS_DEVICE_STATUS: 4}
+    apply_all = mocker.patch.object(device.settings, "apply_all_settings")
+
+    test_device.changed(active=True, **kwargs)
+
+    assert apply_all.called is expect_push
+
+
+def test_changed_still_pushes_on_first_activation(mocker):
+    """Guard against the reconnect change masking the original behaviour: a device
+    going from unknown or inactive to active must still push its settings."""
+    test_device = FakeDevice(fake_hidpp.r_empty, None, None, online=False, device_info=di_CCCC)
+    test_device._name = "TestDevice"
+    test_device._active = None
+    apply_all = mocker.patch.object(device.settings, "apply_all_settings")
+
+    test_device.changed(active=True)
+
+    assert apply_all.called

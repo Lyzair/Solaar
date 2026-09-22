@@ -336,3 +336,29 @@ def test_handle_passkey_pressed(mocker):
     result = notifications.handle_passkey_pressed(receiver, notification)
 
     assert result is True
+
+
+@pytest.mark.parametrize(
+    "data, expected_active, expected_reconnected",
+    [
+        # Captured from a real Lightspeed link recovery: flags 0x30, bit 0x40 clear,
+        # so the link is established and settings have to be pushed again.
+        (b"\x32\x9f\x40", True, True),
+        # Same notification with bit 0x40 set: the link went away, nothing to push.
+        (b"\x72\x9f\x40", False, False),
+    ],
+    ids=["link-established", "link-lost"],
+)
+def test_hidpp10_connection_notification_marks_reconnect(data, expected_active, expected_reconnected, mocker):
+    """A 0x41 connection notification for a link that came back must reach
+    Device.changed() as a reconnect, so the settings push is not skipped for a
+    device that never went inactive."""
+    fake_device = fake_hidpp.Device()
+    fake_device.receiver = None
+    spy_changed = mocker.spy(fake_device, "changed")
+    notification = HIDPPNotification(0, 0, sub_id=Notification.DJ_PAIRING, address=0x11, data=data)
+
+    result = notifications._process_hidpp10_notification(fake_device, notification)
+
+    assert result is True
+    spy_changed.assert_called_once_with(active=expected_active, reconnected=expected_reconnected)

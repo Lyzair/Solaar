@@ -591,7 +591,7 @@ class Device:
             battery = self.battery()
             self.set_battery_info(battery if battery is not None else Battery(None, None, None, None))
 
-    def changed(self, active=None, alert=Alert.NONE, reason=None, push=False):
+    def changed(self, active=None, alert=Alert.NONE, reason=None, push=False, reconnected=False):
         """The status of the device had changed, so invoke the status callback.
         Also push notifications and settings to the device when necessary."""
         if logger.isEnabledFor(logging.DEBUG):
@@ -600,11 +600,17 @@ class Device:
             self.online = active
             was_active, self._active = self._active, active
             if active:
-                # Push settings for new devices when devices request software reconfiguration
-                # and when devices become active if they don't have wireless device status feature,
+                # Push settings for new devices when devices request software reconfiguration,
+                # when devices become active if they don't have wireless device status feature,
+                # and whenever a dropped link is re-established (reconnected).  A link drop can
+                # reset volatile device state, and the device does not necessarily announce it:
+                # WIRELESS_DEVICE_STATUS being advertised does not guarantee the device ever sends
+                # a reconfiguration notification, so its presence is not a safe reason to skip the
+                # push.  See the reconnect path in notifications._process_hidpp10_notification.
                 if (
                     was_active is None
                     or not was_active
+                    or reconnected
                     or push
                     and (not self.features or SupportedFeature.WIRELESS_DEVICE_STATUS not in self.features)
                 ):
